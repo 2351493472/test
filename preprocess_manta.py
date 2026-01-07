@@ -14,7 +14,7 @@ def extract_image_features(class_name):
 
     # 1. 初始化特征提取器 (使用 config 中定义的层)
     # 注意：这里假设你不需要背景去除 (rem_bg=0)，如果需要则要加载 U2Net
-    extract_layer = 35  # 默认 EfficientNet/Swin 的层数
+    extract_layer = 20  # 默认 EfficientNet/Swin 的层数
     model = FeatureExtractor(layer_idx=extract_layer)
     model.to("cuda")
     model.eval()

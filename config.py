@@ -70,6 +70,7 @@
 # MANTA
 dataset = {
     "type": "manta_feature",
+    #"type": "manta",
     # 数据集路径配置
     # 结构应为 data/MANTA/<category>/train/good/...
     "feature_dir": "tmp",
@@ -114,10 +115,14 @@ effnet_config.update({
     # Set-Flow 是对每个视角独立提取特征，所以这里通常指单视角的维度，或者特征提取后的维度。
     # 如果是端到端，这里应该是 [3, 256, 256]
     "img_dims": [3, 256, 256],
-    "map_len" : effnet_config["img_len"] // 32, # feature map width/height (dependent on feature extractor!)
-    "extract_layer" : 35,
-    "img_feat_dims" : 304, # number of image features (dependent on feature extractor!)
-    "n_feat" : 304,
+    #"map_len" : effnet_config["img_len"] // 32, # feature map width/height (dependent on feature extractor!)
+    # "extract_layer" : 20,
+    # "img_feat_dims" : 304, # number of image features (dependent on feature extractor!)
+    # "n_feat" : 304,
+    "map_len" : 16,
+    "extract_layer" : 20,
+    "img_feat_dims" : 176, # number of image features (dependent on feature extractor!)
+    "n_feat" : 176,
     "pos_enc" : 0,
 
     "depth_len" : None,
@@ -140,7 +145,7 @@ effnet_config.update({
     "lr" : 2e-4,
     "batch_size" : 8,
     "eval_batch_size" : 16,
-    "meta_epochs" :  5, # total epochs = meta_epochs * sub_epochs
+    "meta_epochs" :  50, # total epochs = meta_epochs * sub_epochs
     "sub_epochs" :  4, # evaluate after this number of epochs,
     "use_noise" : 0,
 })

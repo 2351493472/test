@@ -84,11 +84,11 @@ class MantaDataset(BaseDataset):
         path = self.image_paths[idx]
         label = self.labels[idx]
 
-        # 读取原图
+        # 1. 读取原图
         image = Image.open(path).convert('RGB')
         w, h = image.size
 
-        # 读取掩码
+        # 2. 读取掩码
         mask_path = self.mask_paths[idx]
         if mask_path is not None:
             mask = Image.open(mask_path).convert('L')
@@ -97,29 +97,50 @@ class MantaDataset(BaseDataset):
         else:
             mask = Image.new('L', (w, h), 0)
 
-        # 垂直切分 5 份
-        unit_h = h // 5
+        # 3. 初始化列表
         views = []
         masks = []
 
-        for i in range(5):
-            # 这里的 crop box 是 (left, upper, right, lower)
-            box = (0, i * unit_h, w, (i + 1) * unit_h)
-            view_crop = image.crop(box)
-            mask_crop = mask.crop(box)
+        # 4. 自适应切分逻辑 (水平/垂直兼容)
+        if w > h:
+            # 宽 > 高，说明是 1280x256 的横向拼接图 (MANTA 默认)
+            unit_w = w // 5
+            for i in range(5):
+                # (left, upper, right, lower)
+                box = (i * unit_w, 0, (i + 1) * unit_w, h)
 
-            # Transform
-            trans_img, trans_mask = self.transform(view_crop, mask_crop)
+                view_crop = image.crop(box)
+                mask_crop = mask.crop(box)
 
-            # Convert
-            trans_img = self.to_tensor(trans_img)
-            trans_img = self.normalize(trans_img)
-            trans_mask = transforms.ToTensor()(trans_mask)  # 保持 0/1
+                # Transform
+                trans_img, trans_mask = self.transform(view_crop, mask_crop)
 
-            views.append(trans_img)
-            masks.append(trans_mask)
+                # 先转 Tensor 再 Normalize
+                img_tensor = self.to_tensor(trans_img)
+                img_normalized = self.normalize(img_tensor)
+                mask_tensor = transforms.ToTensor()(trans_mask)
 
-        # 训练集打乱，测试集绝对不打乱！
+                views.append(img_normalized)
+                masks.append(mask_tensor)
+        else:
+            # 高 > 宽，说明是 256x1280 的纵向拼接图 (兼容旧数据)
+            unit_h = h // 5
+            for i in range(5):
+                box = (0, i * unit_h, w, (i + 1) * unit_h)
+
+                view_crop = image.crop(box)
+                mask_crop = mask.crop(box)
+
+                trans_img, trans_mask = self.transform(view_crop, mask_crop)
+
+                img_tensor = self.to_tensor(trans_img)
+                img_normalized = self.normalize(img_tensor)
+                mask_tensor = transforms.ToTensor()(trans_mask)
+
+                views.append(img_normalized)
+                masks.append(mask_tensor)
+
+        # 5. 训练集打乱，测试集保持顺序
         if self.is_train:
             combined = list(zip(views, masks))
             random.shuffle(combined)

@@ -104,18 +104,18 @@ def train(train_loader, test_loader, config):
                 loss = model.loss(z, jac, mask=foregrounds, per_sample=True)
                 nll = model.loss(z, jac, mask=foregrounds, per_pixel=True)
 
-                # --- 数据重排 (View-Major -> Sample-Major) ---
-                if samplewise:
-                    n_views = 5
-                    actual_B = labels.shape[0] // n_views
-
-                    # nll 重排
-                    H, W = nll.shape[-2], nll.shape[-1]
-                    nll = nll.reshape(n_views, actual_B, H, W).permute(1, 0, 2, 3).reshape(-1, H, W)
-
-                    # loss 重排
-                    loss = loss.reshape(n_views, actual_B).permute(1, 0).reshape(-1)
-                # -----------------------------------------------------
+                # # --- 数据重排 (View-Major -> Sample-Major) ---
+                # if samplewise:
+                #     n_views = 5
+                #     actual_B = labels.shape[0] // n_views
+                #
+                #     # nll 重排
+                #     H, W = nll.shape[-2], nll.shape[-1]
+                #     nll = nll.reshape(n_views, actual_B, H, W).permute(1, 0, 2, 3).reshape(-1, H, W)
+                #
+                #     # loss 重排
+                #     loss = loss.reshape(n_views, actual_B).permute(1, 0).reshape(-1)
+                # # -----------------------------------------------------
 
                 if nll.amin() < train_clamp[0]:
                     print(i, "Warning: Clamping outside of min", nll.amin())
@@ -135,39 +135,54 @@ def train(train_loader, test_loader, config):
                 accum.add_anomap_batch(torch.from_numpy(ano_map).cuda(), torch.from_numpy(mask).cuda())
                 accum.add_image(torch.from_numpy(img_score).cuda(), labels)
 
-                # --- 可视化 ---
-                if True:  # 强制开启
+                #可视化
+                if True:
                     for idx in range(mask.shape[0]):
                         try:
-                            current_filename = filenames[idx]
+                            # [新增过滤逻辑]
+                            # 如果是异常样本，但当前视角的 Mask 是全黑的（没拍到瑕疵），直接跳过！
+                            # 这样能保证展示出来的异常样本全是“有货”的视角。
+                            current_label = labels[idx].item()
+                            current_mask = mask[idx]  # numpy array
+
+                            if current_label == 1 and current_mask.sum() == 0:
+                                continue
+
+                            # --- 以下是之前的切图逻辑 (保持不变) ---
+                            sample_idx = idx // 5
                             view_idx = idx % 5
 
-                            # 1. 读取原图
-                            if current_filename and os.path.exists(current_filename):
-                                ori_full_img = cv2.imread(current_filename)
-                                if ori_full_img is not None:
-                                    ori_full_img = cv2.cvtColor(ori_full_img, cv2.COLOR_BGR2RGB)
+                            if sample_idx >= len(filenames): continue
 
-                                    h, w, c = ori_full_img.shape
+                            current_file = filenames[sample_idx]
+                            fname_str = os.path.basename(str(current_file))
 
-                                    # 2. 裁剪逻辑 (解决变形问题)
-                                    if h > w * 1.5:  # 判定为长图
-                                        unit_h = h // 5
-                                        crop_y1 = view_idx * unit_h
-                                        crop_y2 = (view_idx + 1) * unit_h
-                                        view_img = ori_full_img[crop_y1:crop_y2, :]
-                                    else:
-                                        # 已经是单张图
-                                        view_img = ori_full_img
-
-                                    view_img = cv2.resize(view_img, (256, 256))
-                                    view_img = view_img.astype(np.float32) / 255.0
-                                else:
-                                    view_img = np.zeros((256, 256, 3), dtype=np.float32)
+                            if os.path.exists(current_file):
+                                img_full = cv2.imread(current_file)
+                                if img_full is None: continue
+                                img_full = cv2.cvtColor(img_full, cv2.COLOR_BGR2RGB)
                             else:
-                                view_img = np.zeros((256, 256, 3), dtype=np.float32)
+                                continue
 
-                            # 3. 归一化 Heatmap (解决全蓝问题)
+                            h, w, c = img_full.shape
+
+                            # 切分逻辑
+                            view_img = None
+                            if w > h:  # Horizontal
+                                unit_w = w // 5
+                                x1 = view_idx * unit_w
+                                x2 = (view_idx + 1) * unit_w
+                                view_img = img_full[:, x1:x2, :]
+                            else:  # Vertical
+                                unit_h = h // 5
+                                y1 = view_idx * unit_h
+                                y2 = (view_idx + 1) * unit_h
+                                view_img = img_full[y1:y2, :, :]
+
+                            view_img = cv2.resize(view_img, (256, 256))
+                            view_img = view_img.astype(np.float32) / 255.0
+
+                            # Heatmap 处理
                             am = ano_map[idx]
                             am_min, am_max = am.min(), am.max()
                             if am_max - am_min > 1e-6:
@@ -175,17 +190,16 @@ def train(train_loader, test_loader, config):
                             else:
                                 am_norm = am
 
-                            # 4. 更新 Tracker
                             failure_tracker.update(
                                 anomaly_score=img_score[idx],
-                                filename=f"{os.path.basename(str(filenames[idx]))}_v{view_idx}",
+                                filename=f"{fname_str}_v{view_idx}",
                                 anomaly_map=am_norm,
-                                gt_mask=mask[idx],  # 这里传入 uint8 的 mask
-                                label=labels[idx].item(),
+                                gt_mask=current_mask,
+                                label=current_label,
                                 image=view_img
                             )
                         except Exception as e:
-                            # print(f"Viz Error: {e}")
+                            print(f"Viz Error at idx {idx}: {e}")
                             pass
 
                 img_nll.append(loss.cpu().numpy())
