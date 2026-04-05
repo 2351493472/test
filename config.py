@@ -1,151 +1,104 @@
-#
-# # REALIAD-SETTINGS
-# dataset = {
-#     "feature_dir" : 'tmp/',
-#     "type" : "explicit",
-#     "image_reader" : {
-#         "type" : "opencv",
-#         "kwargs" : {
-#             "image_dir" : "data/anomaly_detection/realiad/classes/",
-#             "color_mode" : "RGB",
-#         }
-#     },
-#     "input_size" : (256,256),
-#     "pixel_mean" : (0.485, 0.456, 0.406),
-#     "pixel_std" : (0.229, 0.224, 0.225),
-#     "test" : {
-#         "meta_file" : "data/anomaly_detection/realiad/jsons/realiad_jsons"
-#     },
-#     "train" : {
-#         "hflip" : False,
-#         "rebalance" : False,
-#         "rotate" : False,
-#         "vflip" : False,
-#         "meta_file" : "data/anomaly_detection/realiad/jsons/realiad_jsons"
-#     },
-#     "type" : "feature",
-#     "workers" : 1,
-#     "batch_size" : 8,
-# }
-#
-# effnet_config = {"n_coupling_blocks" : 6, "img_len" : 768, "data_config" : dataset, "type" : None}
-# effnet_config.update({
-#     "pre_extracted" : True, # were feature pre-extracted with extract_features? (needs to be true)
-#     "device" : "cuda",
-#
-#     # network/data parameters
-#     "img_size" : (effnet_config["img_len"], effnet_config["img_len"]),
-#     "img_dims" : [3, effnet_config["img_len"], effnet_config["img_len"]],
-#     "map_len" : effnet_config["img_len"] // 32, # feature map width/height (dependent on feature extractor!)
-#     "extract_layer" : 35,
-#     "img_feat_dims" : 304, # number of image features (dependent on feature extractor!)
-#     "n_feat" : 304,
-#     "pos_enc" : 0,
-#
-#     "depth_len" : None,
-#     "depth_channels" : None,
-#     "depth_channels" : None,
-#
-#     # network hyperparameters
-#     "clamp": 1.9,
-#     "channels_hidden_teacher" : 64,
-#     "channels_hidden_student" : None,
-#     "use_gamma" : True,
-#     "kernel_sizes" : [3] * (effnet_config["n_coupling_blocks"] - 1) + [5],
-#
-#     # output_settings
-#     "verbose" : True,
-#     "hide_tqdm_bar" : True,
-#     "save_model" : False,
-#
-#     # training parameters
-#     "lr" : 2e-4,
-#     "batch_size" : 8,
-#     "eval_batch_size" : 16,
-#     "meta_epochs" :  10, # total epochs = meta_epochs * sub_epochs
-#     "sub_epochs" :  4, # evaluate after this number of epochs,
-#     "use_noise" : 0,
-# })
-#
-# MANTA
+# ==============================================================================
+# 1. 数据集配置
+# ==============================================================================
 dataset = {
     "type": "manta_feature",
-    #"type": "manta",
-    # 数据集路径配置
-    # 结构应为 data/MANTA/<category>/train/good/...
     "feature_dir": "tmp",
     "root_path": "data/MANTA",
-    "class_name": "capsule",  # 当前训练/测试的类别
+    "class_name": "screw",
 
-    # 图像参数
-    "input_size": (256, 256),  # 单个视角的尺寸
-    "pixel_mean": (0.485, 0.456, 0.406),  # ImageNet 均值
-    "pixel_std": (0.229, 0.224, 0.225),  # ImageNet 方差
+    "input_size": (256, 256),
+    # MANTA 数据集使用 CLIP 归一化（与 manta_dataset.py 中的 Normalize 一致）
+    "pixel_mean": (0.48145466, 0.4578275, 0.40821073),
+    "pixel_std":  (0.26862954, 0.26130258, 0.27577711),
 
-    # DataLoader 参数
-    "batch_size": 32,  # 训练时的 Batch Size
-    "workers": 2,  # 对应 num_workers
+    "batch_size": 32,
+    "workers": 4,
 
-    # 训练特定配置
     "train": {
-        "hflip": True,  # 开启随机水平翻转
-        "vflip": True,  # 开启随机垂直翻转
-        "rotate": True,  # 开启随机旋转
-        # "rebalance": False # MANTA 训练集只有 good，不需要重平衡
+        "hflip": True,
+        "vflip": True,
+        "rotate": True,
     },
-    # 测试特定配置
     "test": {
-        "batch_size": 1,  # 测试通常逐个样本进行
-    }
+        "batch_size": 1,
+    },
 }
 
+# ==============================================================================
+# 2. 模型配置 — ResNet18 骨干 + ICA + 条件归一化流
+# ==============================================================================
 effnet_config = {
-    "n_coupling_blocks": 6,
-    "img_len": 256, # 确保与 input_size 一致
     "data_config": dataset,
-    "type": None
+
+    # --- 骨干网络 ---
+    # ResNet18 layer3: 256 通道, 16×16 空间分辨率 (对 256×256 输入)
+    "backbone": "resnet18",
+    "device": "cuda",
+    "verbose": True,
+    "save_model": False,
+    "pre_extracted": True,
+
+    # --- 特征提取层 ---
+    "extract_layer_flow": 3,      # ResNet18 layer3
+    "extract_layer_phi":  3,      # 同 flow（共用同一层特征）
+
+    # --- 骨干输出通道 ---
+    "raw_n_feat":     256,         # ResNet18 layer3 输出通道数
+    "raw_n_feat_phi": 256,         # 同上
+    # 采用layer4作为辅助，大小为512，采用layer2，大小为128
+    "raw_n_feat_l2":  512,
+    # --- Coarse Flow (16×16 特征图) ---
+    "n_feat":                   256,     # 1×1Conv 投影后的通道数（flow 输入）
+    "map_len":                  16,      # 特征图空间尺寸
+    "n_coupling_blocks":        10,       # 仿射耦合层数
+    "channels_hidden_teacher":  512,     # 耦合层隐藏通道数
+    "kernel_sizes":             [3, 3, 3, 3, 5, 5, 5, 7, 7, 7],
+    "clamp":                    1.2,
+
+    # --- ICA Encoder ---
+    "ica_hidden_dim": 512,    # Φ(·) 输出维度 / h_i 维度
+    "ica_n_iter":       5,    # ICA 迭代轮数 T
+    # τ 初始值（可学习参数），训练中自适应调整
+    # 范围 clamp 至 [0.01, 2.0]
+    "ica_tau":         0.5,
+
+    # --- θ 输出维度（ρ(·) 输出 / 条件 Flow 维度）---
+    "phi_out_dim": 512,
+
+    # --- 通用 ---
+    "use_gamma": True,
+    "use_noise": 0,
 }
+
+# ==============================================================================
+# 3. 训练超参数
+# ==============================================================================
 effnet_config.update({
-    "pre_extracted": True, # 如果我们是端到端训练，这里设为 False；如果是先提取特征再训练 Flow，设为 True
-    "device" : "cuda",
+    "meta_epochs": 10,
+    "sub_epochs":  4,
 
-    # network/data parameters
-    "img_size": (256, 256),
-    # 注意：img_dims 是模型输入的维度。
-    # Set-Flow 是对每个视角独立提取特征，所以这里通常指单视角的维度，或者特征提取后的维度。
-    # 如果是端到端，这里应该是 [3, 256, 256]
-    "img_dims": [3, 256, 256],
-    #"map_len" : effnet_config["img_len"] // 32, # feature map width/height (dependent on feature extractor!)
-    # "extract_layer" : 20,
-    # "img_feat_dims" : 304, # number of image features (dependent on feature extractor!)
-    # "n_feat" : 304,
-    "map_len" : 16,
-    "extract_layer" : 20,
-    "img_feat_dims" : 176, # number of image features (dependent on feature extractor!)
-    "n_feat" : 176,
-    "pos_enc" : 0,
+    "lr":           5e-5,
+    "weight_decay": 1e-4,
 
-    "depth_len" : None,
-    "depth_channels" : None,
-    "depth_channels" : None,
+    # --- 损失权重 ---
+    "lambda_pred":      0.1,   # β：L_pred 跨视角预测一致性损失权重
 
-    # network hyperparameters
-    "clamp": 1.9,
-    "channels_hidden_teacher" : 64,
-    "channels_hidden_student" : None,
-    "use_gamma" : True,
-    "kernel_sizes" : [3] * (effnet_config["n_coupling_blocks"] - 1) + [5],
+    # --- 推理评分 ---
+    # lambda_consensus：S_consensus 权重（作用于归一化后的 [0,1] 分数）
+    # loo_flow_weight ：LOO Flow NLL 与标准 NLL 的融合权重
+    "lambda_spread": 0.0,
+    "loo_flow_weight":  0.5,
 
-    # output_settings
-    "verbose" : True,
-    "hide_tqdm_bar" : True,
-    "save_model" : False,
+    # --- 其他 ---
+    "prefix":    "resnet18_ica_v2",
+    "project":   "03_csflow_realiad",
+    "seed":      10000,
+    "arch":      "cs_neigh",
+    "rem_bg":    False,
+    "samplewise": 1,
+    "wandb":     False,
 
-    # training parameters
-    "lr" : 2e-4,
-    "batch_size" : 8,
-    "eval_batch_size" : 16,
-    "meta_epochs" :  50, # total epochs = meta_epochs * sub_epochs
-    "sub_epochs" :  4, # evaluate after this number of epochs,
-    "use_noise" : 0,
+    "feat_noise_std": 0.05,
+    "ema_decay":      0.99,
 })

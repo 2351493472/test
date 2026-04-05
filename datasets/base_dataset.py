@@ -6,14 +6,12 @@ from torchvision import transforms
 
 import datasets.transforms as T
 
+# PIL 10+ 移除了 Image.BILINEAR/NEAREST，改用 Image.Resampling.*
+_BILINEAR = getattr(Image, 'Resampling', Image).BILINEAR
+_NEAREST  = getattr(Image, 'Resampling', Image).NEAREST
+
 
 class BaseDataset(Dataset):
-    """
-    A dataset should implement
-        1. __len__ to get size of the dataset, Required
-        2. __getitem__ to get a single data, Required
-
-    """
     def __init__(self):
         super(BaseDataset, self).__init__()
 
@@ -25,42 +23,31 @@ class BaseDataset(Dataset):
 
 
 class TrainBaseTransform(object):
-    """
-    Resize, flip, rotation for image and mask
-    """
+    """Resize, flip, rotation for image and mask."""
     def __init__(self, input_size, hflip, vflip, rotate):
-        self.input_size = input_size  # h x w
+        self.input_size = input_size
         self.hflip = hflip
         self.vflip = vflip
         self.rotate = rotate
 
     def __call__(self, image, mask):
-        transform_fn = transforms.Resize(self.input_size, Image.BILINEAR)
-        image = transform_fn(image)
-        transform_fn = transforms.Resize(self.input_size, Image.NEAREST)
-        mask = transform_fn(mask)
+        image = transforms.Resize(self.input_size, _BILINEAR)(image)
+        mask  = transforms.Resize(self.input_size, _NEAREST)(mask)
         if self.hflip:
-            transform_fn = T.RandomHFlip()
-            image, mask = transform_fn(image, mask)
+            image, mask = T.RandomHFlip()(image, mask)
         if self.vflip:
-            transform_fn = T.RandomVFlip()
-            image, mask = transform_fn(image, mask)
+            image, mask = T.RandomVFlip()(image, mask)
         if self.rotate:
-            transform_fn = T.RandomRotation([0, 90, 180, 270])
-            image, mask = transform_fn(image, mask)
+            image, mask = T.RandomRotation([0, 90, 180, 270])(image, mask)
         return image, mask
 
 
 class TestBaseTransform(object):
-    """
-    Resize for image and mask
-    """
+    """Resize for image and mask."""
     def __init__(self, input_size):
-        self.input_size = input_size  # h x w
+        self.input_size = input_size
 
     def __call__(self, image, mask):
-        transform_fn = transforms.Resize(self.input_size, Image.BILINEAR)
-        image = transform_fn(image)
-        transform_fn = transforms.Resize(self.input_size, Image.NEAREST)
-        mask = transform_fn(mask)
+        image = transforms.Resize(self.input_size, _BILINEAR)(image)
+        mask  = transforms.Resize(self.input_size, _NEAREST)(mask)
         return image, mask

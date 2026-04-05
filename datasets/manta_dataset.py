@@ -1,3 +1,17 @@
+"""
+MantaDataset — MANTA 多视角工业图像数据集
+==========================================
+
+数据结构：
+  data/MANTA/{class_name}/
+    ├── train/good/          # 正常样本（1280×256 拼接图）
+    ├── test/good/           # 测试集正常样本
+    ├── test/{defect_type}/  # 测试集异常样本
+    └── ground_truth/{defect_type}/  # 像素级GT掩码
+
+每张图片为 1280×256（5个视角水平拼接），切割为 5 个 256×256 视角。
+训练时随机打乱视角顺序（强制 DeFinetti 置换不变性）。
+"""
 import os
 import random
 import torch
@@ -14,6 +28,7 @@ class MantaDataset(BaseDataset):
         self.class_name = class_name
         self.is_train = is_train
         self.input_size = input_size
+        self.n_views = 5
 
         if is_train:
             self.transform = TrainBaseTransform(input_size, hflip=True, vflip=True, rotate=True)
@@ -21,11 +36,14 @@ class MantaDataset(BaseDataset):
             self.transform = TestBaseTransform(input_size)
 
         self.to_tensor = transforms.ToTensor()
-        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        self.normalize = transforms.Normalize(
+            mean=[0.48145466, 0.4578275, 0.40821073],
+            std=[0.26862954, 0.26130258, 0.27577711]
+        )
 
-        self.image_paths, self.labels, self.mask_paths = self.load_dataset_folder()
+        self.image_paths, self.labels, self.mask_paths = self._load_dataset()
 
-    def load_dataset_folder(self):
+    def _load_dataset(self):
         image_paths, labels, mask_paths = [], [], []
         phase = 'train' if self.is_train else 'test'
         phase_dir = os.path.join(self.root, self.class_name, phase)
@@ -35,46 +53,38 @@ class MantaDataset(BaseDataset):
             print(f"[Error] Directory not found: {phase_dir}")
             return [], [], []
 
-        for img_type in os.listdir(phase_dir):
+        for img_type in sorted(os.listdir(phase_dir)):
             img_dir = os.path.join(phase_dir, img_type)
-            if not os.path.isdir(img_dir): continue
+            if not os.path.isdir(img_dir):
+                continue
 
             label = 0 if img_type == 'good' else 1
 
-            for img_name in os.listdir(img_dir):
+            for img_name in sorted(os.listdir(img_dir)):
                 if not img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif')):
                     continue
 
-                img_path = os.path.join(img_dir, img_name)
-                image_paths.append(img_path)
+                image_paths.append(os.path.join(img_dir, img_name))
                 labels.append(label)
 
-                # --- 核心修复：寻找 Mask ---
+                # 寻找对应的 GT 掩码
                 found_mask = None
                 if label == 1:
-                    # 1. 尝试直接拼接路径 (同名文件)
-                    # 假设结构: ground_truth/crack/001.png
-                    candidate_1 = os.path.join(gt_root, img_type, img_name)
-                    # 2. 尝试替换后缀 (例如原图 .jpg, mask 是 .png)
                     basename = os.path.splitext(img_name)[0]
-                    candidate_2 = os.path.join(gt_root, img_type, basename + '.png')
-                    # 3. 尝试加 _mask 后缀
-                    candidate_3 = os.path.join(gt_root, img_type, basename + '_mask.png')
-
-                    if os.path.exists(candidate_1):
-                        found_mask = candidate_1
-                    elif os.path.exists(candidate_2):
-                        found_mask = candidate_2
-                    elif os.path.exists(candidate_3):
-                        found_mask = candidate_3
-                    else:
-                        # 4. 暴力搜索 (防止文件夹命名不一致)
-                        # 有些数据集 GT 放在 ground_truth/defective/ 这种通用文件夹下
-                        pass
+                    candidates = [
+                        os.path.join(gt_root, img_type, img_name),
+                        os.path.join(gt_root, img_type, basename + '.png'),
+                        os.path.join(gt_root, img_type, basename + '_mask.png'),
+                    ]
+                    for c in candidates:
+                        if os.path.exists(c):
+                            found_mask = c
+                            break
 
                 mask_paths.append(found_mask)
 
-        print(f"[{phase}] Loaded {len(image_paths)} images. Found {sum(1 for m in mask_paths if m)} masks.")
+        n_masks = sum(1 for m in mask_paths if m is not None)
+        print(f"[{phase}] {len(image_paths)} images, {n_masks} masks found.")
         return image_paths, labels, mask_paths
 
     def __len__(self):
@@ -84,11 +94,10 @@ class MantaDataset(BaseDataset):
         path = self.image_paths[idx]
         label = self.labels[idx]
 
-        # 1. 读取原图
         image = Image.open(path).convert('RGB')
         w, h = image.size
 
-        # 2. 读取掩码
+        # 读取掩码
         mask_path = self.mask_paths[idx]
         if mask_path is not None:
             mask = Image.open(mask_path).convert('L')
@@ -97,50 +106,31 @@ class MantaDataset(BaseDataset):
         else:
             mask = Image.new('L', (w, h), 0)
 
-        # 3. 初始化列表
-        views = []
-        masks = []
+        views, masks = [], []
 
-        # 4. 自适应切分逻辑 (水平/垂直兼容)
+        # 切割为 5 个视角（自适应水平/垂直拼接）
         if w > h:
-            # 宽 > 高，说明是 1280x256 的横向拼接图 (MANTA 默认)
-            unit_w = w // 5
-            for i in range(5):
-                # (left, upper, right, lower)
-                box = (i * unit_w, 0, (i + 1) * unit_w, h)
-
-                view_crop = image.crop(box)
-                mask_crop = mask.crop(box)
-
-                # Transform
-                trans_img, trans_mask = self.transform(view_crop, mask_crop)
-
-                # 先转 Tensor 再 Normalize
-                img_tensor = self.to_tensor(trans_img)
-                img_normalized = self.normalize(img_tensor)
-                mask_tensor = transforms.ToTensor()(trans_mask)
-
-                views.append(img_normalized)
-                masks.append(mask_tensor)
+            # 1280×256 水平拼接（MANTA 默认）
+            unit = w // self.n_views
+            boxes = [(i * unit, 0, (i + 1) * unit, h) for i in range(self.n_views)]
         else:
-            # 高 > 宽，说明是 256x1280 的纵向拼接图 (兼容旧数据)
-            unit_h = h // 5
-            for i in range(5):
-                box = (0, i * unit_h, w, (i + 1) * unit_h)
+            # 256×1280 垂直拼接（兼容旧数据）
+            unit = h // self.n_views
+            boxes = [(0, i * unit, w, (i + 1) * unit) for i in range(self.n_views)]
 
-                view_crop = image.crop(box)
-                mask_crop = mask.crop(box)
+        for box in boxes:
+            view_crop = image.crop(box)
+            mask_crop = mask.crop(box)
 
-                trans_img, trans_mask = self.transform(view_crop, mask_crop)
+            trans_img, trans_mask = self.transform(view_crop, mask_crop)
 
-                img_tensor = self.to_tensor(trans_img)
-                img_normalized = self.normalize(img_tensor)
-                mask_tensor = transforms.ToTensor()(trans_mask)
+            img_tensor  = self.normalize(self.to_tensor(trans_img))
+            mask_tensor = self.to_tensor(trans_mask)   # [1, H, W]
 
-                views.append(img_normalized)
-                masks.append(mask_tensor)
+            views.append(img_tensor)
+            masks.append(mask_tensor)
 
-        # 5. 训练集打乱，测试集保持顺序
+        # 训练时打乱视角顺序（强制置换不变性）
         if self.is_train:
             combined = list(zip(views, masks))
             random.shuffle(combined)
@@ -151,7 +141,6 @@ class MantaDataset(BaseDataset):
 
 
 def build_manta_dataloader(cfg, training, distributed=False):
-    # 构建函数，供 data_builder 调用
     dataset = MantaDataset(
         root=cfg['root_path'],
         class_name=cfg['class_name'],
@@ -159,8 +148,6 @@ def build_manta_dataloader(cfg, training, distributed=False):
         input_size=cfg.get('input_size', (256, 256))
     )
 
-    # 构建 DataLoader
-    # batch_size, num_workers 等从 cfg 读取
     loader = DataLoader(
         dataset,
         batch_size=cfg.get('batch_size', 16),

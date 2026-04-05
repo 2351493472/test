@@ -87,8 +87,6 @@ def viz_maps(img, gt, ano_map, prefix='', norm=True, class_name=None, vmin=0, vm
 
 def visualize(tracked_results, prefix, class_name, vmin, vmax, is_ano):
     for i, (score, filename, ano_map, gt, image) in enumerate(tracked_results):
-        # [修改] 使用 np.round 而不是 torch.round，因为 score 是 numpy float
-        # 或者直接使用 f-string 格式化
         viz_maps(image, gt, ano_map, prefix, norm=False, class_name=class_name, vmin=vmin, vmax=vmax,
                  filename=f"{'anomaly' if is_ano else 'normal'}_{i:04d}.png",
                  title=f"{filename}. Score: {np.round(score, 4)}")

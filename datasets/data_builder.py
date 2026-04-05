@@ -1,11 +1,8 @@
 import logging
 
-from datasets.cifar_dataset import build_cifar10_dataloader
-from datasets.custom_dataset import build_custom_dataloader
-from datasets.explicit_dataset import build_explicit_dataloader
-from datasets.feature_dataset import build_feature_dataloader
 from datasets.manta_dataset import build_manta_dataloader
 from datasets.manta_feature_dataset import build_manta_feature_dataloader
+
 logger = logging.getLogger("global")
 
 
@@ -16,17 +13,11 @@ def build(cfg, training, distributed):
         cfg.update(cfg.get("test", {}))
 
     dataset = cfg["type"]
-    if dataset == "custom":
-        data_loader = build_custom_dataloader(cfg, training, distributed)
-    elif dataset == "cifar10":
-        data_loader = build_cifar10_dataloader(cfg, training, distributed)
-    elif dataset == 'explicit':
-        data_loader = build_explicit_dataloader(cfg, training, distributed)
-    elif dataset == 'feature':
-        data_loader = build_feature_dataloader(cfg, training, distributed)
-    elif dataset == "manta": #图片模式
+
+    # [修改] 移除了其他数据集的 if-else 分支
+    if dataset == "manta":  # 图片模式 (preprocess_manta.py 使用)
         data_loader = build_manta_dataloader(cfg, training, distributed)
-    elif dataset == "manta_feature":    #特征模式
+    elif dataset == "manta_feature":  # 特征模式 (set_train.py 使用)
         data_loader = build_manta_feature_dataloader(cfg, training, distributed)
     else:
         raise NotImplementedError(f"{dataset} is not supported")

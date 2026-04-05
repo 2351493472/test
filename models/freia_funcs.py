@@ -329,3 +329,23 @@ class ReversibleGraphNet(nn.Module):
                 raise RuntimeError("Are you sure all used Nodes are in the "
                                    "Node list?")
         return jacobian
+class ConditionNode(InputNode):
+    '''Special type of node that represents a conditional input (e.g. global theta).'''
+
+    def __init__(self, *dims, name='condition'):
+        super(ConditionNode, self).__init__(*dims, name=name)
+        self.name = name
+        self.data = dummy_data(*dims)
+        self.outputs = []
+        self.module = None
+        self.computed_rev = None
+        self.n_outputs = 1
+        self.input_vars = []
+        self.out0 = (self, 0)
+
+    def build_modules(self, verbose=VERBOSE):
+        return [self.data.shape]
+
+    def run_forward(self, op_list):
+        # 运行时，条件数据会通过 feed_dict 或参数传入，这里只需占位
+        return [(self.id, 0)]

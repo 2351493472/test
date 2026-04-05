@@ -1,3 +1,11 @@
+"""
+MantaFeatureDataset — 多尺度预提取特征数据集
+=============================================
+
+返回 (flow, phi, layer2), label, filename, mask
+  - flow/phi : [5, 256, 16, 16]  layer3 特征
+  - layer2   : [5, 128, 32, 32]  layer2 特征（像素评分用）
+"""
 import torch
 import numpy as np
 import os
@@ -8,61 +16,76 @@ class MantaFeatureDataset(Dataset):
     def __init__(self, root, class_name, is_train=True):
         super().__init__()
         split = 'train' if is_train else 'test'
+        base_dir = os.path.join(root, 'features', class_name)
 
-        # 路径
-        feature_path = os.path.join(root, 'features', class_name, f'{split}.npy')
-        label_path = os.path.join(root, 'features', class_name, f'{split}_labels.npy')
-        filename_path = os.path.join(root, 'features', class_name, f'{split}_filenames.npy')
-        mask_path = os.path.join(root, 'features', class_name, f'{split}_masks.npy')  # <--- 新增
+        flow_path  = os.path.join(base_dir, f'{split}_flow.npy')
+        l2_path    = os.path.join(base_dir, f'{split}_layer2.npy')
+        label_path = os.path.join(base_dir, f'{split}_labels.npy')
+        fname_path = os.path.join(base_dir, f'{split}_filenames.npy')
+        mask_path  = os.path.join(base_dir, f'{split}_masks.npy')
 
-        # 1. Load Features
-        if not os.path.exists(feature_path):
-            raise RuntimeError(f"Feature file not found: {feature_path}")
-        self.features = torch.from_numpy(np.load(feature_path)).float()
+        if not os.path.exists(flow_path):
+            raise RuntimeError(f"Feature file not found: {flow_path}")
 
-        # 2. Load Filenames
-        if os.path.exists(filename_path):
-            self.filenames = np.load(filename_path)
+        self.features_flow = torch.from_numpy(np.load(flow_path)).float()
+
+        # phi 与 flow 共用同一层
+        phi_path = os.path.join(base_dir, f'{split}_phi.npy')
+        if os.path.exists(phi_path):
+            self.features_phi = torch.from_numpy(np.load(phi_path)).float()
         else:
-            self.filenames = [f"unknown_{i}" for i in range(len(self.features))]
+            self.features_phi = self.features_flow
 
-        # 3. Load Labels
+        # layer2 特征（像素级评分）
+        if os.path.exists(l2_path):
+            self.features_l2 = torch.from_numpy(np.load(l2_path)).float()
+            print(f"  [{split}] layer2 loaded: {list(self.features_l2.shape)}")
+        else:
+            self.features_l2 = None
+            print(f"  [{split}] layer2 not found, pixel scoring will use flow only")
+
+        # 标签
         if os.path.exists(label_path):
             self.labels = torch.from_numpy(np.load(label_path)).long()
         else:
-            self.labels = torch.zeros(len(self.features), dtype=torch.long)
+            self.labels = torch.zeros(len(self.features_flow), dtype=torch.long)
 
-        # 4. Load Masks <--- 新增
-        if os.path.exists(mask_path):
-            # [N, 5, 1, H, W]
-            self.masks = torch.from_numpy(np.load(mask_path)).float()
+        # 文件名
+        if os.path.exists(fname_path):
+            self.filenames = np.load(fname_path)
         else:
-            # 如果没有 Mask 文件 (比如训练集)，生成全黑 Mask
-            # 这里的 H, W 需要根据 features 的 spatial size 推断吗？
-            # 不，Mask 应该是原图大小 (256x256)，features 也是 input_size 传入模型的
-            # 假设 input size 是 256
-            b = self.features.shape[0]
+            self.filenames = [f"unknown_{i}" for i in range(len(self.features_flow))]
+
+        # 掩码
+        if os.path.exists(mask_path):
+            mask_data = np.load(mask_path)
+            self.masks = torch.from_numpy(mask_data.astype(np.float32) / 255.0)
+        else:
+            b = self.features_flow.shape[0]
             self.masks = torch.zeros((b, 5, 1, 256, 256), dtype=torch.float32)
 
+        print(f"  [{split}] {len(self)} samples loaded")
+
     def __len__(self):
-        return len(self.features)
+        return len(self.features_flow)
 
     def __getitem__(self, idx):
-        # 返回增加 mask
-        return self.features[idx], self.labels[idx], self.filenames[idx], self.masks[idx]
+        l2 = self.features_l2[idx] if self.features_l2 is not None else torch.tensor([])
+        return (self.features_flow[idx], self.features_phi[idx], l2), \
+            self.labels[idx], self.filenames[idx], self.masks[idx]
+
 
 def build_manta_feature_dataloader(cfg, training, distributed=False):
-    # 构建函数
     dataset = MantaFeatureDataset(
-        root=cfg.get('feature_dir', 'tmp'),  # 从 config 读取根目录
+        root=cfg.get('feature_dir', 'tmp'),
         class_name=cfg['class_name'],
         is_train=training
     )
-
     loader = DataLoader(
         dataset,
-        batch_size=cfg.get('batch_size', 32),  # 特征训练显存占用小，Batch 可设大
+        batch_size=cfg.get('batch_size', 32),
         shuffle=training,
-        num_workers=cfg.get('workers', 2)
+        num_workers=cfg.get('workers', 2),
+        pin_memory=True
     )
     return loader
