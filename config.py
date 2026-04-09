@@ -23,6 +23,46 @@ dataset = {
     "test": {
         "batch_size": 1,
     },
+
+    # ==========================================================================
+    # 镜面高光去除配置
+    # ==========================================================================
+    "specular_removal": {
+        # 全局开关：False = 完全关闭，对所有类跳过
+        "enabled": False,
+
+        # 独立类别调参
+        "classes": {
+            "screw": {
+                "strategy": "fg_adaptive",
+                "fg_percentile": 91.0,
+                "min_blob_area": 20,
+                "inpaint_radius": 9,
+                "dilate_iters": 2,
+                "dilate_ksize": 3,
+                "blend_alpha": 0.90,
+            },
+            "power_inductor": {
+                "strategy": "local_contrast",
+                "local_sigma": 25.0,
+                "local_thresh": 0.10,
+                "abs_gray_thresh": 0.50,
+                "inpaint_radius": 7,
+                "dilate_iters": 2,
+                "dilate_ksize": 3,
+                "blend_alpha": 0.90,
+            },
+            "bolt": {
+                "strategy": "hsv_abs",
+                "sat_thresh": 0.28,
+                "val_thresh": 0.70,
+                "inpaint_radius": 7,
+                "dilate_iters": 2,
+                "dilate_ksize": 3,
+                "blend_alpha": 0.90,
+            }
+        }
+    },
 }
 
 # ==============================================================================
@@ -32,7 +72,6 @@ effnet_config = {
     "data_config": dataset,
 
     # --- 骨干网络 ---
-    # ResNet18 layer3: 256 通道, 16×16 空间分辨率 (对 256×256 输入)
     "backbone": "resnet18",
     "device": "cuda",
     "verbose": True,
@@ -46,22 +85,20 @@ effnet_config = {
     # --- 骨干输出通道 ---
     "raw_n_feat":     256,         # ResNet18 layer3 输出通道数
     "raw_n_feat_phi": 256,         # 同上
-    # 采用layer4作为辅助，大小为512，采用layer2，大小为128
-    "raw_n_feat_l2":  512,
+    "raw_n_feat_l2":  128,         # ResNet18 layer2 输出通道数
+    
     # --- Coarse Flow (16×16 特征图) ---
     "n_feat":                   256,     # 1×1Conv 投影后的通道数（flow 输入）
     "map_len":                  16,      # 特征图空间尺寸
-    "n_coupling_blocks":        10,       # 仿射耦合层数
+    "n_coupling_blocks":        12,       # 仿射耦合层数
     "channels_hidden_teacher":  512,     # 耦合层隐藏通道数
-    "kernel_sizes":             [3, 3, 3, 3, 5, 5, 5, 7, 7, 7],
+    "kernel_sizes":             [3, 3, 3, 3, 5, 5, 5, 5, 7, 7, 7, 7],
     "clamp":                    1.2,
 
     # --- ICA Encoder ---
     "ica_hidden_dim": 512,    # Φ(·) 输出维度 / h_i 维度
     "ica_n_iter":       5,    # ICA 迭代轮数 T
-    # τ 初始值（可学习参数），训练中自适应调整
-    # 范围 clamp 至 [0.01, 2.0]
-    "ica_tau":         0.5,
+    "ica_tau":         0.5,   # τ 初始值（可学习参数）
 
     # --- θ 输出维度（ρ(·) 输出 / 条件 Flow 维度）---
     "phi_out_dim": 512,
@@ -69,6 +106,15 @@ effnet_config = {
     # --- 通用 ---
     "use_gamma": True,
     "use_noise": 0,
+    
+    # --- 消融实验开关 ---
+    "ablation": {
+        "use_ica":          True,   # ICA Encoder 聚合机制 (扩展预留)
+        "use_theta_cond":   True,   # θ 条件化 Flow（False → 用零向量替代 θ 条件）
+        "use_feature_bank": True,   # Feature Bank 多尺度像素评分（False → 停用 L2，仅用 NLL）
+        "use_loo":          False,  # LOO Image Scoring（False → 默认关闭由其开销大且对 multi-view 无额外收益）
+        "use_pred_loss":    True,   # L_pred 跨视角预测一致性损失
+    },
 }
 
 # ==============================================================================
@@ -83,20 +129,13 @@ effnet_config.update({
 
     # --- 损失权重 ---
     "lambda_pred":      0.1,   # β：L_pred 跨视角预测一致性损失权重
-
-    # --- 推理评分 ---
-    # lambda_consensus：S_consensus 权重（作用于归一化后的 [0,1] 分数）
-    # loo_flow_weight ：LOO Flow NLL 与标准 NLL 的融合权重
-    "lambda_spread": 0.0,
-    "loo_flow_weight":  0.5,
+    "loo_flow_weight":  0.5,   # 如果启用了 LOO，与标准 NLL 融合的权重
 
     # --- 其他 ---
     "prefix":    "resnet18_ica_v2",
     "project":   "03_csflow_realiad",
-    "seed":      10000,
+    "seed":      0,
     "arch":      "cs_neigh",
-    "rem_bg":    False,
-    "samplewise": 1,
     "wandb":     False,
 
     "feat_noise_std": 0.05,

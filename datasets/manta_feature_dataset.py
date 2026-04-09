@@ -60,6 +60,8 @@ class MantaFeatureDataset(Dataset):
         if os.path.exists(mask_path):
             mask_data = np.load(mask_path)
             self.masks = torch.from_numpy(mask_data.astype(np.float32) / 255.0)
+            if self.masks.dim() == 4:
+                self.masks = self.masks.unsqueeze(2)
         else:
             b = self.features_flow.shape[0]
             self.masks = torch.zeros((b, 5, 1, 256, 256), dtype=torch.float32)

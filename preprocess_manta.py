@@ -80,6 +80,9 @@ def extract_image_features(class_name):
 
                     labels_list.append(labels.cpu())
 
+                    if masks_stack.dim() == 4:  # [B, 5, H, W] -> [B, 5, 1, H, W]
+                        masks_stack = masks_stack.unsqueeze(2)
+
                     masks_uint8 = (
                         (masks_stack * 255).byte()
                         if masks_stack.dtype == torch.float

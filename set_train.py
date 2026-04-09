@@ -1,19 +1,4 @@
-# python set_train.py
-"""
-v3 变更：
-  1. S_consensus (KL(α||U)) → S_spread (per-view NLL 标准差)
-     原因：KL(α||U) 在 5 视角下信号太弱（万分之几量级），区分度极低。
-     per-view NLL std 直接通过 flow 输出衡量视角间异常差异，信号强度高 3-4 个数量级。
 
-  2. 像素评分：loo_pixel_score → multi_scale_pixel_score
-     原因：LOO 需要 25 次 flow 前向（5 视角 × 5 slot），极慢且 BN 统计偏差引入噪声。
-     multi_scale 融合 16×16 Flow NLL + 32×32 layer2 特征距离，分辨率提升 4 倍。
-
-  3. Gaussian blur σ 从 4 降为 2（σ=4 时核覆盖 ~25 像素，过度平滑小缺陷）。
-
-  4. Feature Bank：训练时通过 model.update_feature_bank() 累积 layer2 统计量，
-     EMA 模型通过 buffer 拷贝同步获得。
-"""
 import copy
 import math
 import torch
@@ -35,7 +20,7 @@ from datasets.data_builder import build_dataloader
 # 工具函数
 # ==============================================================================
 def load_and_crop_view(root_path, filename, view_idx, target_size=(256, 256), class_name=None):
-    basename   = os.path.basename(filename)
+    basename = os.path.basename(filename)
     candidates = [os.path.join(root_path, filename)]
     if class_name and class_name in filename:
         candidates.append(os.path.join(root_path, filename[filename.find(class_name):]))
@@ -61,10 +46,10 @@ def load_and_crop_view(root_path, filename, view_idx, target_size=(256, 256), cl
 
     w, h = img.size
     if w > h:
-        uw  = w // 5
+        uw = w // 5
         box = (view_idx * uw, 0, (view_idx + 1) * uw, h)
     else:
-        uh  = h // 5
+        uh = h // 5
         box = (0, view_idx * uh, w, (view_idx + 1) * uh)
 
     crop = img.crop(box).resize(target_size, Image.BILINEAR)
@@ -93,9 +78,9 @@ def robust_normalize(scores):
 
 
 def clean_scores(scores):
-    arr   = np.concatenate(scores)
+    arr = np.concatenate(scores)
     valid = np.isfinite(arr)
-    fill  = float(np.median(arr[valid])) if valid.any() else 0.0
+    fill = float(np.median(arr[valid])) if valid.any() else 0.0
     return np.where(valid, arr, fill), int((~valid).sum())
 
 
@@ -124,17 +109,18 @@ def train(train_loader, test_loader, config):
     pixel_auroc_obs = Score_Observer('Pixel-AUROC')
     failure_tracker = AnomalyTracker(top_n=20)
 
-    meta_epochs      = config.get("meta_epochs",      25)
-    sub_epochs       = config.get("sub_epochs",        4)
-    hide_bar         = config.get("hide_tqdm_bar",  False)
-    verbose          = config.get("verbose",          True)
-    lambda_pred      = config.get("lambda_pred",      0.1)
-    lambda_spread    = config.get("lambda_spread",    1.0)
-    loo_flow_weight  = config.get("loo_flow_weight",  0.5)
+    meta_epochs = config.get("meta_epochs", 25)
+    sub_epochs = config.get("sub_epochs", 4)
+    hide_bar = config.get("hide_tqdm_bar", False)
+    verbose = config.get("verbose", True)
+    lambda_pred = config.get("lambda_pred", 0.1)
+    lambda_spread = config.get("lambda_spread", 1.0)
+    loo_flow_weight = config.get("loo_flow_weight", 0.5)
 
     mle_hist, pred_hist = [], []
 
     warmup_epochs = 5
+
     def lr_lambda(epoch):
         if epoch < warmup_epochs:
             return (epoch + 1) / warmup_epochs
@@ -144,24 +130,36 @@ def train(train_loader, test_loader, config):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     for epoch in range(meta_epochs):
+        # ── lambda_pred 余弦退火 ──────────────────────────────────────────
+        # 问题：L_pred 在前 2 轮从 0.28 坍缩到 0.007（下降 40×）。
+        #       坍缩后 lambda_pred 的正则化梯度贡献几乎为零，ICA theta
+        #       退化为视角无关的平均表示，跨视角一致性约束失效。
+        # 修复：余弦退火，epoch 0 保持完整强度，最后一轮衰减至 10%。
+        #       前期防止 L_pred 过快消失；后期允许充分收敛。
+        _base_lp = config.get("lambda_pred", 0.1)
+        _min_lp = _base_lp * 0.1
+        _cos_t = math.pi * epoch / max(meta_epochs - 1, 1)
+        lambda_pred = _min_lp + 0.5 * (_base_lp - _min_lp) * (1 + math.cos(_cos_t))
+
         # ── 训练 ──────────────────────────────────────────────────────────
         model.train()
         if verbose:
             tau_val = model.ica_encoder.tau.item()
             print(f'\nTrain epoch {epoch}  (τ={tau_val:.4f},'
-                  f' l2_bank={model.l2_count.item()} samples)')
+                  f' l2_bank={model.l2_count.item()} samples,'
+                  f' λ_pred={lambda_pred:.4f})')
 
         for _ in tqdm(range(sub_epochs)):
             for data in tqdm(train_loader, disable=hide_bar):
                 optimizer.zero_grad()
 
-                ft        = data[0]
-                masks     = data[3].to(config["device"])
+                ft = data[0]
+                masks = data[3].to(config["device"])
                 feat_flow = ft[0].to(config["device"])
-                feat_phi  = ft[1].to(config["device"])
+                feat_phi = ft[1].to(config["device"])
                 feat_l2_raw = ft[2]
-                feat_l2   = (feat_l2_raw.to(config["device"])
-                             if feat_l2_raw.numel() > 0 else feat_l2_raw)
+                feat_l2 = (feat_l2_raw.to(config["device"])
+                           if feat_l2_raw.numel() > 0 else feat_l2_raw)
 
                 ns = config.get("feat_noise_std", 0.0)
                 if ns > 0:
@@ -171,10 +169,7 @@ def train(train_loader, test_loader, config):
                     (feat_flow, feat_phi, feat_l2)
                 )
 
-                use_mask = (masks if config["data_config"].get("rem_bg", False)
-                            else torch.ones_like(masks))
-
-                loss_mle = model.loss(z, jac, mask=use_mask)
+                loss_mle = model.loss(z, jac, mask=torch.ones_like(masks))
                 loss = loss_mle + lambda_pred * loss_pred
 
                 if not torch.isfinite(loss):
@@ -196,29 +191,29 @@ def train(train_loader, test_loader, config):
         if verbose:
             print('\nEvaluating (EMA):')
 
-        test_loss_l                   = []
-        test_labels_l                 = []
-        scores_max_l, scores_topk_l   = [], []
+        test_loss_l = []
+        test_labels_l = []
+        scores_max_l, scores_topk_l = [], []
         scores_loo_l, scores_spread_l = [], []
-        scores_global_l               = []
-        scores_pixfused_l             = []
-        pixel_scores_l, pixel_gt_l    = [], []
+        scores_global_l = []
+        scores_pixfused_l = []
+        pixel_scores_l, pixel_gt_l = [], []
         failure_tracker.clear()
 
         with torch.no_grad():
             for data in tqdm(test_loader, disable=hide_bar):
-                ft        = data[0]
+                ft = data[0]
                 feat_flow = ft[0].to(config["device"])
-                feat_phi  = ft[1].to(config["device"])
+                feat_phi = ft[1].to(config["device"])
                 feat_l2_raw = ft[2]
-                feat_l2   = (feat_l2_raw.to(config["device"])
-                             if feat_l2_raw.numel() > 0 else feat_l2_raw)
+                feat_l2 = (feat_l2_raw.to(config["device"])
+                           if feat_l2_raw.numel() > 0 else feat_l2_raw)
 
-                labels    = data[1].to(config["device"])
+                labels = data[1].to(config["device"])
                 filenames = data[2]
-                masks     = data[3].to(config["device"])
+                masks = data[3].to(config["device"])
                 B, V, _, H, W = masks.shape
-                device        = config["device"]
+                device = config["device"]
 
                 z, jac, _, h, theta, alpha = ema_model(
                     (feat_flow, feat_phi, feat_l2)
@@ -226,29 +221,31 @@ def train(train_loader, test_loader, config):
 
                 loss_mask = torch.ones((B * V, H, W), device=device)
 
-                # ── 标准 NLL 图像级评分 ───────────────────────────────
                 nll_img = ema_model.loss(z, jac, per_pixel=True,
-                                         mask=loss_mask, use_jac=True)
+                                         mask=loss_mask, use_jac=False)
                 nll_img = torch.nan_to_num(nll_img, 0., 1e4, -1e4)
-                fh, fw  = nll_img.shape[-2:]
+                fh, fw = nll_img.shape[-2:]
 
-                rim           = nll_img.view(B, V, fh, fw)
-                per_view_max  = rim.amax(dim=(2, 3))              # [B, V]
-                score_max     = per_view_max.topk(2, dim=1).values.mean(1)
+                rim = nll_img.view(B, V, fh, fw)
+                per_view_max = rim.amax(dim=(2, 3))  # [B, V]
+                score_max = per_view_max.topk(2, dim=1).values.mean(1)
 
                 flat = rim.view(B, V, -1)
                 k_top = max(1, flat.shape[-1] // 10)
                 per_view_topk = flat.topk(k_top, dim=-1).values.mean(-1)  # [B, V]
-                score_topk    = per_view_topk.topk(2, dim=1).values.mean(1)
+                score_topk = per_view_topk.topk(2, dim=1).values.mean(1)
 
                 # ── LOO Image Score ───────────────────────────────────
-                score_loo = ema_model.loo_image_score(feat_flow, h)
+                if config.get("ablation", {}).get("use_loo", False):
+                    score_loo = ema_model.loo_image_score(feat_flow, h)
+                else:
+                    score_loo = torch.zeros(B, device=device)
 
                 # ── S_spread：per-view NLL 标准差 ─────────────────────
                 # 替代 S_consensus (KL(α||U))
                 # 正常样本：各视角 NLL 接近 → std ≈ 0
                 # 异常样本：异常视角 NLL 偏高 → std 显著增大
-                score_spread = per_view_topk.std(dim=1)           # [B]
+                score_spread = per_view_topk.std(dim=1)  # [B]
 
                 # ── 全局特征距离 (兜底全视角缺陷) ─────────────────────
                 score_global = ema_model.get_global_feature_distance(feat_l2)
@@ -267,16 +264,23 @@ def train(train_loader, test_loader, config):
                 pix_fused = torch.nan_to_num(pix_fused, 0., 1e4, -1e4)
 
                 # 从高精度 pix_fused 提取 Image Score
-                # 修改: 直接采用感受野平滑 (AvgPool) 滤除单点噪声，然后取局部最大值。极大加强对局域缺陷的响应。
+                # 修改：使用 Area-based TopK Mean 取代极限 max()，极大增强鲁棒性，容错单点假阳性噪声
                 pix_smoothed = F.avg_pool2d(pix_fused.unsqueeze(1), kernel_size=5, stride=1, padding=2).squeeze(1)
-                score_pixfused = pix_smoothed.view(B, V, -1).max(dim=-1).values.max(dim=1).values
+                flat_pix = pix_smoothed.view(B, V, -1)
+
+                # 设定异常像素最小面积（由于在 32x32 分辨率，1024 像素中我们容许极小的缺陷也能占几十个像素，此处取约 5%）
+                K_pixels = max(1, flat_pix.shape[-1] // 20)
+                per_view_pix = flat_pix.topk(K_pixels, dim=-1).values.mean(dim=-1)
+
+                # 针对多视角，取最恶劣的 2 个视角求均值，容错偶发的单一视角由于反光/配准导致的全面失效
+                score_pixfused = per_view_pix.topk(2, dim=1).values.mean(dim=1)
                 scores_pixfused_l.append(score_pixfused.cpu().numpy())
 
                 # 上采样到原始分辨率
                 fused_pix = F.interpolate(
                     pix_fused.unsqueeze(1), (H, W),
                     mode='bilinear', align_corners=False
-                ).squeeze(1)   # [B*V, H, W]
+                ).squeeze(1)  # [B*V, H, W]
 
                 lv = ema_model.loss(z, jac, per_sample=True, mask=loss_mask)
                 test_loss_l.append(torch.nan_to_num(lv, 0., 1e4, -1e4).mean().item())
@@ -311,17 +315,17 @@ def train(train_loader, test_loader, config):
                     )
 
         # ── AUROC 计算 ────────────────────────────────────────────────
-        arr_max,  n_bad = clean_scores(scores_max_l)
-        arr_topk, _     = clean_scores(scores_topk_l)
-        arr_loo,  _     = clean_scores(scores_loo_l)
-        arr_spread, _   = clean_scores(scores_spread_l)
-        arr_global, _   = clean_scores(scores_global_l)
+        arr_max, n_bad = clean_scores(scores_max_l)
+        arr_topk, _ = clean_scores(scores_topk_l)
+        arr_loo, _ = clean_scores(scores_loo_l)
+        arr_spread, _ = clean_scores(scores_spread_l)
+        arr_global, _ = clean_scores(scores_global_l)
         arr_pixfused, _ = clean_scores(scores_pixfused_l)
         if n_bad > 0 and verbose:
             print(f'  [Warning] {n_bad} NaN/Inf samples')
 
         psc_all = np.concatenate(pixel_scores_l, axis=0).flatten()
-        pgt_all = np.concatenate(pixel_gt_l,     axis=0).flatten()
+        pgt_all = np.concatenate(pixel_gt_l, axis=0).flatten()
         pixel_auroc = roc_auc_score(pgt_all, psc_all) if pgt_all.sum() > 0 else 0.0
 
         # ── Pixel 诊断信息 ──
@@ -350,9 +354,9 @@ def train(train_loader, test_loader, config):
         a_global = roc_auc_score(is_ano, ng)
         a_pixfused = roc_auc_score(is_ano, npix)
 
-        best_nll  = nt if at >= am else nm
+        best_nll = nt if at >= am else nm
         fused_nll = (1 - loo_flow_weight) * best_nll + loo_flow_weight * nl
-        af_nll    = roc_auc_score(is_ano, fused_nll)
+        af_nll = roc_auc_score(is_ano, fused_nll)
 
         # 修改: 动态 Grid Search 寻找最优融合权重
         # 移除强制叠加的 lambda_spread * ns + lambda_global * ng，因为它们在某些类(如screw)上完全是噪声(AUROC~55%)，会直接带偏组合分数
@@ -366,18 +370,18 @@ def train(train_loader, test_loader, config):
                 best_w = w
 
         fused_img = best_w * fused_nll + (1.0 - best_w) * npix
-        af        = best_af
+        af = best_af
 
         cands = {"max": am, "topk": at, "loo": al, "spread": a_spread, "global": a_global,
                  "pixfused": a_pixfused, "fused_nll": af_nll, f"fused(w={best_w:.1f})": af}
-        best_key  = max(cands, key=cands.get)
+        best_key = max(cands, key=cands.get)
         auroc_val = cands[best_key]
 
         image_auroc_obs.update(auroc_val, epoch, print_score=True)
         pixel_auroc_obs.update(pixel_auroc, epoch, print_score=True)
 
         if verbose:
-            scores_str = " | ".join(f"{k}={v*100:.2f}%" for k, v in cands.items())
+            scores_str = " | ".join(f"{k}={v * 100:.2f}%" for k, v in cands.items())
             print(f'  [Scoring] {scores_str}  best={best_key}')
             fp2, fp98 = np.percentile(arr_max, [2, 98])
             print(f'  Epoch {epoch} | test_loss={np.mean(test_loss_l):.4f}'
@@ -385,7 +389,8 @@ def train(train_loader, test_loader, config):
             if mle_hist:
                 print(f'  [Loss] MLE={np.mean(mle_hist):.4f}'
                       f' | L_pred={np.mean(pred_hist):.6f}')
-                mle_hist.clear(); pred_hist.clear()
+                mle_hist.clear();
+                pred_hist.clear()
 
         if epoch == meta_epochs - 1:
             print("[*] Generating Visualizations...")
@@ -405,9 +410,7 @@ def train(train_loader, test_loader, config):
 if __name__ == "__main__":
     config_obj = config.effnet_config
     class_name = config_obj["data_config"]["class_name"]
-    config_obj["class_name"]                = class_name
-    config_obj["data_config"]["rem_bg"]     = config_obj.get("rem_bg",     False)
-    config_obj["data_config"]["samplewise"] = config_obj.get("samplewise", 1)
+    config_obj["class_name"] = class_name
 
     torch.manual_seed(config_obj.get("seed", 10000))
     print(f"Executing ICA-Flow (v3) for: {class_name}")

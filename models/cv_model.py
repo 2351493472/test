@@ -260,7 +260,7 @@ class Model(nn.Module):
             momentum = 0.99 # EMA 系数，更关注当前模型的状态
             self.l2_mean.copy_(momentum * self.l2_mean + (1 - momentum) * batch_mean)
             self.l2_var.copy_(momentum * self.l2_var + (1 - momentum) * batch_var)
-            
+
         self.l2_count.fill_(self.l2_count.item() + n)
 
     # ── 多尺度像素评分 ──────────────────────────────────────────────────────
@@ -308,7 +308,10 @@ class Model(nn.Module):
         nll_16 = 0.5 * z_ordered.pow(2).mean(dim=1)   # [B*N, 16, 16]
 
         # ── Scale 2: Feature distance at 32×32 ──
-        if x_l2.numel() > 0 and self.l2_count > 100:
+        use_l2 = x_l2.numel() > 0 and self.l2_count > 100
+        use_l2 = use_l2 and getattr(self, "config", getattr(self, "args", {})).get("ablation", {}).get("use_feature_bank", True)
+        
+        if use_l2:
             B, N, C, H2, W2 = x_l2.shape
             flat_l2 = x_l2.view(B * N, C, H2, W2)
 
@@ -343,22 +346,22 @@ class Model(nn.Module):
         """
         if x_l2.numel() == 0 or self.l2_count <= 100:
             return torch.zeros(max(1, x_l2.shape[0]), device=x_l2.device)
-            
+
         B, N, C, H2, W2 = x_l2.shape
         flat_l2 = x_l2.view(B * N, C, H2, W2)
 
         mean = self.l2_mean.view(1, C, 1, 1).to(flat_l2.device)
         std  = (self.l2_var + 1e-6).sqrt().view(1, C, 1, 1).to(flat_l2.device)
-        
+
         # 归一化特征
         z_l2 = (flat_l2 - mean) / std
-        
+
         # 计算每个视角的平均距离 (标量) -> [B*N]
         dist_per_view = z_l2.pow(2).mean(dim=(1, 2, 3))
-        
+
         # 聚合视角 -> [B, N]
         dist_per_view = dist_per_view.view(B, N)
-        
+
         # 取各视角最大特征差异作为样本级得分
         score_global = dist_per_view.max(dim=1).values
         return score_global
@@ -395,11 +398,14 @@ class Model(nn.Module):
         jac_aligned  = torch.clamp(
             jac[result].view(-1, 1, 1) / spatial_size, -1e3, 1e3
         )
-        sq_z = (mask.unsqueeze(1) * z[result] - means) ** 2
+        sq_z = (z[result] - means) ** 2
         if use_jac:
-            pixel_scores = 0.5 * sq_z.mean(dim=1) - mask * jac_aligned
+            pixel_scores = 0.5 * sq_z.mean(dim=1) - jac_aligned
         else:
             pixel_scores = 0.5 * sq_z.mean(dim=1)
+        
+        if mask is not None:
+             pixel_scores = pixel_scores * mask
 
         if per_pixel:
             return pixel_scores
@@ -422,15 +428,20 @@ class Model(nn.Module):
             mask_v[v] = False
             theta_neg_v, _, _ = self.ica_encoder(h, view_mask=mask_v)
 
-            vv = x_proj[:, v]
+            # 获取其余 4 个视角
+            other_views = [x_proj[:, i] for i in range(N) if i != v]
+            # 为了填充 5 个 slot（网络架构写死了 5 视角耦合），我们复制最后一个视角
+            padded_views = other_views + [other_views[-1]]
+
             flow_in = self._build_flow_inputs(
-                [vv] * N, theta_neg_v, B, map_h, map_w, training=False
+                padded_views, theta_neg_v, B, map_h, map_w, training=False
             )
             z_slots = self.net(flow_in)
-            z_cat   = torch.cat(z_slots, dim=0)
+            # 只提取来自其他 4 个视角（N-1）的特征表达
+            z_cat   = torch.cat(z_slots[:N-1], dim=0)
 
             sq_z  = z_cat.pow(2).mean(dim=1)
-            nll_v = sq_z.view(N, B, map_h, map_w).mean(dim=0)
+            nll_v = sq_z.view(N-1, B, map_h, map_w).mean(dim=0)
 
             flat_nll = nll_v.view(B, -1)
             k        = max(1, int(flat_nll.shape[-1] * 0.10))
@@ -457,13 +468,18 @@ class Model(nn.Module):
 
         theta, alpha, _ = self.ica_encoder(h)
 
+        # [Ablation] 0 向量替代 θ
+        if not self.config.get("ablation", {}).get("use_theta_cond", True):
+            theta = torch.zeros_like(theta)
+
         # 3. Feature Bank 更新（训练时）
         if self.training and x_l2.numel() > 0:
-            self.update_feature_bank(x_l2)
+            if self.config.get("ablation", {}).get("use_feature_bank", True):
+                self.update_feature_bank(x_l2)
 
         # 4. L_pred（训练时）
         loss_pred = torch.tensor(0.0, device=device)
-        if self.training:
+        if self.training and self.config.get("ablation", {}).get("use_pred_loss", True):
             lpred_sum = 0.0
             for k in range(n_views):
                 mask_k    = torch.ones(n_views, dtype=torch.bool, device=device)
