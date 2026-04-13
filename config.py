@@ -5,7 +5,7 @@ dataset = {
     "type": "manta_feature",
     "feature_dir": "tmp",
     "root_path": "data/MANTA",
-    "class_name": "screw",
+    "class_name": "led",
 
     "input_size": (256, 256),
     # MANTA 数据集使用 CLIP 归一化（与 manta_dataset.py 中的 Normalize 一致）
@@ -97,8 +97,16 @@ effnet_config = {
 
     # --- ICA Encoder ---
     "ica_hidden_dim": 512,    # Φ(·) 输出维度 / h_i 维度
-    "ica_n_iter":       5,    # ICA 迭代轮数 T
-    "ica_tau":         0.5,   # τ 初始值（可学习参数）
+    "ica_n_iter":       5,    # ICA 迭代轮数 T（仅 irls 模式有效）
+    "ica_tau":         0.5,   # τ 初始值（可学习参数，仅 irls 模式有效）
+
+    # --- 多视角聚合策略 (消融实验) ---
+    # 可选: "maxpool" | "mean" | "attention" | "irls"
+    #   maxpool   — 逐通道取 max，仅保留最显著视角信号
+    #   mean      — 简单平均，无可学习参数
+    #   attention — 单次 learned query-key attention
+    #   irls      — 迭代重加权最小二乘（默认，原始方法）
+    "aggregation_mode": "irls",
 
     # --- θ 输出维度（ρ(·) 输出 / 条件 Flow 维度）---
     "phi_out_dim": 512,
@@ -115,6 +123,7 @@ effnet_config = {
         "use_loo":          False,  # LOO Image Scoring（False → 默认关闭由其开销大且对 multi-view 无额外收益）
         "use_pred_loss":    True,   # L_pred 跨视角预测一致性损失
     },
+    # 注：aggregation_mode 独立于 ablation 开关，直接配置在上方
 }
 
 # ==============================================================================

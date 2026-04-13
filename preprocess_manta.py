@@ -123,7 +123,7 @@ def extract_image_features(class_name):
         print(f"  flow: {full_flow.shape}, layer2: {full_l2.shape}, masks: {full_masks.shape}")
 
     if train_loader:
-        process_loader(train_loader, "train", aug_times=3)
+        process_loader(train_loader, "train", aug_times=5)
     if test_loader:
         process_loader(test_loader, "test", aug_times=1)
 

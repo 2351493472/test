@@ -36,11 +36,12 @@ from .freia_funcs import (
 # ==============================================================================
 class ICAEncoder(nn.Module):
     def __init__(self, in_channels, hidden_dim=128, out_dim=256,
-                 n_iter=3, tau_init=0.5):
+                 n_iter=3, tau_init=0.5, aggregation_mode='irls'):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.n_iter     = n_iter
-        self.log_tau    = nn.Parameter(torch.tensor(math.log(tau_init)))
+        self.hidden_dim       = hidden_dim
+        self.n_iter           = n_iter
+        self.aggregation_mode = aggregation_mode
+        self.log_tau          = nn.Parameter(torch.tensor(math.log(tau_init)))
 
         self.phi_proj = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=False),
@@ -61,6 +62,10 @@ class ICAEncoder(nn.Module):
             nn.LayerNorm(out_dim),
         )
 
+        # attention 模式：可学习 query vector（单次 dot-product attention）
+        if aggregation_mode == 'attention':
+            self.attn_query = nn.Parameter(torch.randn(hidden_dim))
+
     @property
     def tau(self):
         return self.log_tau.exp().clamp(min=0.01, max=2.0)
@@ -70,24 +75,45 @@ class ICAEncoder(nn.Module):
         x = self.pool(x).flatten(1)
         return self.phi_mlp(x)
 
-    def ica_aggregate(self, h, view_mask=None):
+    def aggregate(self, h, view_mask=None):
+        """多视角聚合，支持 4 种策略：maxpool / mean / attention / irls"""
         h_used = h[:, view_mask] if view_mask is not None else h
         B, N, D = h_used.shape
-        mu    = h_used.mean(dim=1)
-        alpha = torch.ones(B, N, device=h.device) / N
-        tau   = self.tau
 
-        for _ in range(self.n_iter):
-            mu_n  = F.normalize(mu, dim=-1).unsqueeze(1)
-            h_n   = F.normalize(h_used, dim=-1)
-            sim   = (h_n * mu_n).sum(dim=-1) / tau
-            alpha = F.softmax(sim, dim=-1)
-            mu    = (alpha.unsqueeze(-1) * h_used).sum(dim=1)
+        if self.aggregation_mode == 'maxpool':
+            mu    = h_used.max(dim=1).values                      # [B, D]
+            alpha = torch.ones(B, N, device=h.device) / N
+
+        elif self.aggregation_mode == 'mean':
+            mu    = h_used.mean(dim=1)                             # [B, D]
+            alpha = torch.ones(B, N, device=h.device) / N
+
+        elif self.aggregation_mode == 'attention':
+            # 单次 learned attention：query · key / sqrt(D) → softmax → 加权求和
+            q      = self.attn_query.unsqueeze(0).expand(B, -1)    # [B, D]
+            scores = (h_used * q.unsqueeze(1)).sum(dim=-1) / (D ** 0.5)  # [B, N]
+            alpha  = F.softmax(scores, dim=-1)
+            mu     = (alpha.unsqueeze(-1) * h_used).sum(dim=1)     # [B, D]
+
+        elif self.aggregation_mode == 'irls':
+            # 迭代重加权最小二乘（原始方法）
+            mu    = h_used.mean(dim=1)
+            alpha = torch.ones(B, N, device=h.device) / N
+            tau   = self.tau
+            for _ in range(self.n_iter):
+                mu_n  = F.normalize(mu, dim=-1).unsqueeze(1)
+                h_n   = F.normalize(h_used, dim=-1)
+                sim   = (h_n * mu_n).sum(dim=-1) / tau
+                alpha = F.softmax(sim, dim=-1)
+                mu    = (alpha.unsqueeze(-1) * h_used).sum(dim=1)
+
+        else:
+            raise ValueError(f"Unknown aggregation_mode: {self.aggregation_mode}")
 
         return mu, alpha
 
     def forward(self, h, view_mask=None):
-        mu, alpha = self.ica_aggregate(h, view_mask)
+        mu, alpha = self.aggregate(h, view_mask)
         theta     = self.rho(mu)
         return theta, alpha, mu
 
@@ -192,8 +218,10 @@ class Model(nn.Module):
         # ── ICA Encoder
         self.phi_out_dim = phi_out_dim
         self.ica_hidden  = ica_hidden
+        agg_mode = config.get("aggregation_mode", "irls")
         self.ica_encoder = ICAEncoder(raw_phi, ica_hidden, phi_out_dim,
-                                      ica_n_iter, ica_tau)
+                                      ica_n_iter, ica_tau,
+                                      aggregation_mode=agg_mode)
 
         # ── Predictive Decoder
         self.pred_decoder = PredictiveDecoder(phi_out_dim, ica_hidden)

@@ -173,11 +173,23 @@ def load_weights(model, class_name, suffix, device="cuda"):
 
     # 兼容旧版：如果 key 都不以 'net.' / 'ica_encoder.' 等开头，说明是仅 net 的旧格式
     sample_key = next(iter(state_dict))
-    if not any(sample_key.startswith(p) for p in ('net.', 'ica_encoder.', 'pred_decoder.', 'flow_')):
+    if not any(sample_key.startswith(p) for p in ('net.', 'ica_encoder.', 'pred_decoder.', 'flow_', 'l2_')):
         print("  [compat] Detected legacy net-only checkpoint, loading into model.net")
         model.net.load_state_dict(state_dict)
     else:
-        model.load_state_dict(state_dict)
+        # 检查并过滤掉形状不匹配的 key（如 Feature Bank 的 l2_mean/l2_var）
+        model_sd = model.state_dict()
+        filtered_sd = {}
+        skipped = []
+        for k, v in state_dict.items():
+            if k in model_sd and model_sd[k].shape != v.shape:
+                skipped.append((k, v.shape, model_sd[k].shape))
+            else:
+                filtered_sd[k] = v
+        if skipped:
+            for k, ckpt_shape, model_shape in skipped:
+                print(f"  [compat] Skipped '{k}': ckpt={list(ckpt_shape)} vs model={list(model_shape)}")
+        model.load_state_dict(filtered_sd, strict=False)
 
     model.eval()
     model.to(device)

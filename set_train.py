@@ -1,8 +1,11 @@
 
 import copy
+import csv
+import json
 import math
 import torch
 import numpy as np
+from datetime import datetime
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 import torch.nn.functional as F
@@ -82,6 +85,60 @@ def clean_scores(scores):
     valid = np.isfinite(arr)
     fill = float(np.median(arr[valid])) if valid.any() else 0.0
     return np.where(valid, arr, fill), int((~valid).sum())
+
+
+# ==============================================================================
+# 实验结果记录
+# ==============================================================================
+def save_experiment_result(config, image_auroc, pixel_auroc):
+    """
+    将消融实验结果追加写入 CSV 和 JSON 文件。
+    文件路径: result/ablation_results.csv / .json
+    """
+    result_dir = "result"
+    os.makedirs(result_dir, exist_ok=True)
+
+    record = {
+        "timestamp":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "class_name":       config.get("class_name", ""),
+        "aggregation_mode": config.get("aggregation_mode", "irls"),
+        "use_theta_cond":   config.get("ablation", {}).get("use_theta_cond", True),
+        "use_feature_bank": config.get("ablation", {}).get("use_feature_bank", True),
+        "use_pred_loss":    config.get("ablation", {}).get("use_pred_loss", True),
+        "use_loo":          config.get("ablation", {}).get("use_loo", False),
+        "meta_epochs":      config.get("meta_epochs", 0),
+        "sub_epochs":       config.get("sub_epochs", 0),
+        "lr":               config.get("lr", 0),
+        "image_auroc":      round(image_auroc, 4),
+        "pixel_auroc":      round(pixel_auroc, 4),
+        "prefix":           config.get("prefix", ""),
+    }
+
+    # ── CSV ──
+    csv_path = os.path.join(result_dir, "ablation_results.csv")
+    file_exists = os.path.exists(csv_path)
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=record.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(record)
+
+    # ── JSON (追加到数组) ──
+    json_path = os.path.join(result_dir, "ablation_results.json")
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            try:
+                records = json.load(f)
+            except json.JSONDecodeError:
+                records = []
+    else:
+        records = []
+    records.append(record)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+
+    print(f"[*] Result saved → {csv_path} & {json_path}")
+    return record
 
 
 # ==============================================================================
@@ -401,6 +458,13 @@ def train(train_loader, test_loader, config):
     if config.get("save_model", False):
         save_weights(model, config["class_name"], config["prefix"], config["device"])
 
+    # ── 保存实验结果到 CSV/JSON ──
+    save_experiment_result(
+        config,
+        image_auroc=image_auroc_obs.best_score / 100.0,  # best_score 是百分制
+        pixel_auroc=pixel_auroc_obs.best_score / 100.0,
+    )
+
     return image_auroc_obs, pixel_auroc_obs, None
 
 
@@ -413,7 +477,8 @@ if __name__ == "__main__":
     config_obj["class_name"] = class_name
 
     torch.manual_seed(config_obj.get("seed", 10000))
-    print(f"Executing ICA-Flow (v3) for: {class_name}")
+    agg_mode = config_obj.get("aggregation_mode", "irls")
+    print(f"Executing ICA-Flow (v3) for: {class_name}  [aggregation={agg_mode}]")
 
     train_loader, test_loader = build_dataloader(config_obj["data_config"], distributed=False)
     train(train_loader, test_loader, config=config_obj)
